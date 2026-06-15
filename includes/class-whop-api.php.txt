@@ -1,0 +1,23 @@
+// POST /wp-json/whop/v1/webhook
+add_action('rest_api_init', function() {
+    register_rest_route('whop/v1', '/webhook', [
+        'methods'  => 'POST',
+        'callback' => 'handle_whop_webhook',
+    ]);
+});
+
+function handle_whop_webhook($request) {
+    $data = $request->get_json_params();
+    
+    if ($data['type'] === 'payment.succeeded') {
+        $order_id = $data['data']['metadata']['woo_order_id'];
+        $order = wc_get_order($order_id);
+        
+        if ($order) {
+            $order->payment_complete($data['data']['id']);
+            $order->add_order_note('Whop payment: ' . $data['data']['id']);
+        }
+    }
+    
+    return new WP_REST_Response('OK', 200);
+}
