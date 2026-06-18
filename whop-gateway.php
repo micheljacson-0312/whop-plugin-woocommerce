@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 if (!defined('ABSPATH')) exit; // direct access band
 
 class WC_Whop_Gateway extends WC_Payment_Gateway {
@@ -6,7 +6,7 @@ class WC_Whop_Gateway extends WC_Payment_Gateway {
     public $api_key;
     public $company_id;
     public $exchange_rate;
-    public $gateway_fee_pkr;
+    public $gateway_fee_percent;
     public $return_url_custom;
 
     public function __construct() {
@@ -21,7 +21,7 @@ class WC_Whop_Gateway extends WC_Payment_Gateway {
         $this->api_key          = $this->get_option('api_key');
         $this->company_id       = $this->get_option('company_id');
         $this->exchange_rate    = $this->get_option('exchange_rate');
-        $this->gateway_fee_pkr  = $this->get_option('gateway_fee_pkr');
+        $this->gateway_fee_percent = $this->get_option('gateway_fee_percent');
         $this->return_url_custom = $this->get_option('return_url_custom');
 
         add_action('woocommerce_update_options_payment_gateways_' . $this->id, [$this, 'process_admin_options']);
@@ -29,62 +29,71 @@ class WC_Whop_Gateway extends WC_Payment_Gateway {
 
     public function init_form_fields() {
         $this->form_fields = [
-            'enabled'    => ['type' => 'checkbox', 'title' => 'Enable'],
-            'title'      => ['type' => 'text', 'default' => 'Pay with Whop'],
-            'api_key'    => ['type' => 'password', 'title' => 'Whop API Key'],
+            'enabled' => ['type' => 'checkbox', 'title' => 'Enable'],
+            'title' => ['type' => 'text', 'default' => 'Pay with Whop'],
+            'api_key' => ['type' => 'password', 'title' => 'Whop API Key'],
             'company_id' => ['type' => 'text', 'title' => 'Company ID (biz_xxx)'],
             'webhook_secret' => [
-                'type'        => 'password',
-                'title'       => 'Webhook Secret',
+                'type' => 'password',
+                'title' => 'Webhook Secret',
                 'description' => 'Whop dashboard ke webhook table se copy karo. Iske bina webhook reject ho jayega (security).',
-                'desc_tip'    => true,
+                'desc_tip' => true,
             ],
             'exchange_rate' => [
-                'type'        => 'text',
-                'title'       => 'PKR to USD rate',
+                'type' => 'text',
+                'title' => 'PKR to USD rate',
                 'description' => 'Kitne PKR = 1 USD. Example: 280',
-                'default'     => '280',
-                'desc_tip'    => true,
+                'default' => '280',
+                'desc_tip' => true,
             ],
-            'gateway_fee_pkr' => [
-                'type'        => 'text',
-                'title'       => 'Gateway fee (PKR)',
-                'description' => 'Order total mein add hone wali fee, USD convert hone se pehle. Example: 500',
-                'default'     => '500',
-                'desc_tip'    => true,
+            'gateway_fee_percent' => [
+                'type' => 'text',
+                'title' => 'Gateway fee (%)',
+                'description' => 'Order total par percentage fee. Example: 10 likho to 10% add hoga (1000 par 100 PKR).',
+                'default' => '10',
+                'desc_tip' => true,
             ],
             'return_url_custom' => [
-                'type'        => 'text',
-                'title'       => 'Return URL (optional)',
+                'type' => 'text',
+                'title' => 'Return URL (optional)',
                 'description' => 'Filhaal Whop hosted checkout apna default success page dikhata hai; order webhook se complete hota hai.',
-                'default'     => '',
-                'desc_tip'    => true,
+                'default' => '',
+                'desc_tip' => true,
             ],
         ];
     }
 
-    /** (pkr_total + fee_pkr) / rate -> USD */
+    /** (pkr_total + percentage_fee) / rate -> USD */
     private function convert_to_usd($order) {
         $pkr_total = floatval($order->get_total());
-        $fee_pkr   = floatval($this->gateway_fee_pkr);
+        $fee_pkr   = $this->calculate_fee_pkr($pkr_total);
         $rate      = floatval($this->exchange_rate);
         if ($rate <= 0) $rate = 280;
         return round(($pkr_total + $fee_pkr) / $rate, 2);
+    }
+
+    /** Percentage fee ko PKR amount me convert karta hai. Example: 1000 par 10% = 100 */
+    private function calculate_fee_pkr($pkr_total) {
+        $percent = floatval($this->gateway_fee_percent);
+        if ($percent < 0) $percent = 0;
+        return round($pkr_total * ($percent / 100), 2);
     }
 
     public function process_payment($order_id) {
         $order = wc_get_order($order_id);
 
         $pkr_total  = floatval($order->get_total());
+        $fee_pkr    = $this->calculate_fee_pkr($pkr_total);
         $usd_amount = $this->convert_to_usd($order);
 
         // Reconciliation note + meta
         $order->add_order_note(sprintf(
-            'Whop checkout create attempt: PKR %s + fee PKR %s @ rate %s = USD %s',
-            number_format($pkr_total, 2), $this->gateway_fee_pkr, $this->exchange_rate, $usd_amount
+            'Whop checkout create attempt: PKR %s + fee %s%% (PKR %s) @ rate %s = USD %s',
+            number_format($pkr_total, 2), $this->gateway_fee_percent, number_format($fee_pkr, 2), $this->exchange_rate, $usd_amount
         ));
         $order->update_meta_data('_whop_pkr_total', $pkr_total);
-        $order->update_meta_data('_whop_fee_pkr', floatval($this->gateway_fee_pkr));
+        $order->update_meta_data('_whop_fee_percent', floatval($this->gateway_fee_percent));
+        $order->update_meta_data('_whop_fee_pkr', $fee_pkr);
         $order->update_meta_data('_whop_rate', floatval($this->exchange_rate));
         $order->update_meta_data('_whop_usd_charged', $usd_amount);
         $order->save();
@@ -95,21 +104,21 @@ class WC_Whop_Gateway extends WC_Payment_Gateway {
             'timeout' => 30, // default 5s kam parta hai
             'headers' => [
                 'Authorization' => 'Bearer ' . $this->api_key,
-                'Content-Type'  => 'application/json',
+                'Content-Type' => 'application/json',
             ],
             'body' => json_encode([
                 'currency' => 'usd',
                 'plan' => [
-                    'initial_price' => $usd_amount,   // dollars (e.g. 17.86)
-                    'plan_type'     => 'one_time',
-                    'company_id'    => $this->company_id, // <-- plan ke ANDAR
-                    'currency'      => 'usd',
+                    'initial_price' => $usd_amount, // dollars (e.g. 17.86)
+                    'plan_type' => 'one_time',
+                    'company_id' => $this->company_id, // <-- plan ke ANDAR
+                    'currency' => 'usd',
                 ],
                 'metadata' => [
-                    'woo_order_id'   => (string) $order_id,
+                    'woo_order_id' => (string) $order_id,
                     'customer_email' => $order->get_billing_email(),
-                    'pkr_total'      => (string) $pkr_total,
-                    'usd_charged'    => (string) $usd_amount,
+                    'pkr_total' => (string) $pkr_total,
+                    'usd_charged' => (string) $usd_amount,
                 ],
             ]),
         ]);
@@ -121,13 +130,13 @@ class WC_Whop_Gateway extends WC_Payment_Gateway {
         }
 
         $code = wp_remote_retrieve_response_code($response);
-        $raw  = wp_remote_retrieve_body($response);
+        $raw = wp_remote_retrieve_body($response);
         $body = json_decode($raw, true);
 
         // plan id nikaalo - response shape ke liye fallback
         $plan_id = '';
-        if (!empty($body['plan']['id']))      $plan_id = $body['plan']['id'];
-        elseif (!empty($body['plan_id']))     $plan_id = $body['plan_id'];
+        if (!empty($body['plan']['id'])) $plan_id = $body['plan']['id'];
+        elseif (!empty($body['plan_id'])) $plan_id = $body['plan_id'];
 
         // Success: 2xx + plan id mila
         if ($code >= 200 && $code < 300 && $plan_id) {
